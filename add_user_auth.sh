@@ -3,23 +3,21 @@
 set -e
 
 # ==========================================
-# Configuration
+# CONFIGURATION
 # ==========================================
 
 DOMAIN_DN="dc=zohoserver,dc=local"
-PEOPLE_OU="ou=people"
+PEOPLE_OU="ou=users"
 GROUPS_OU="ou=groups"
 
-STORAGE_SERVER="192.168.1.11"
 REALM="ZOHOSERVER.LOCAL"
-
 MIN_UID=10001
 
 # ==========================================
-# Input
+# INPUT
 # ==========================================
 
-echo "========== USER ONBOARDING =========="
+echo "========== AUTH USER ONBOARDING =========="
 
 read -p "Enter Username: " USERNAME
 
@@ -28,26 +26,25 @@ if [ -z "$USERNAME" ]; then
     exit 1
 fi
 
-# prevent duplicates
+# Check if user already exists
 if getent passwd "$USERNAME" >/dev/null 2>&1; then
     echo "ERROR: User '$USERNAME' already exists."
     exit 1
 fi
 
-# LDAP password prompt (hidden)
+# LDAP admin password
 read -s -p "Enter LDAP admin password: " LDAP_PASS
 echo
 
 # ==========================================
-# UID Generation
+# FIND NEXT UID
 # ==========================================
 
 echo "[+] Finding next available UID..."
 
-LAST_UID=$(ldapsearch -x \
-    -LLL \
+LAST_UID=$(ldapsearch -x -LLL \
     -b "$DOMAIN_DN" \
-    uidNumber | \
+    "(uidNumber=*)" uidNumber | \
     awk '/uidNumber:/ {print $2}' | \
     sort -n | tail -1)
 
@@ -57,10 +54,10 @@ else
     NEW_UID=$((LAST_UID + 1))
 fi
 
-echo "[+] Assigned UID: $NEW_UID"
+echo "[+] Assigned UID/GID: $NEW_UID"
 
 # ==========================================
-# Create LDAP Group
+# CREATE LDAP GROUP
 # ==========================================
 
 GROUP_FILE="/tmp/${USERNAME}_group.ldif"
@@ -69,7 +66,6 @@ cat > "$GROUP_FILE" <<EOF
 dn: cn=$USERNAME,$GROUPS_OU,$DOMAIN_DN
 objectClass: top
 objectClass: posixGroup
-
 cn: $USERNAME
 gidNumber: $NEW_UID
 EOF
@@ -77,25 +73,24 @@ EOF
 echo "[+] Creating LDAP group..."
 
 ldapadd -x \
--D "cn=admin,$DOMAIN_DN" \
--w "$LDAP_PASS" \
--f "$GROUP_FILE"
+    -D "cn=admin,$DOMAIN_DN" \
+    -w "$LDAP_PASS" \
+    -f "$GROUP_FILE"
 
 rm -f "$GROUP_FILE"
 
 # ==========================================
-# Create LDAP User
+# CREATE LDAP USER
 # ==========================================
 
 USER_FILE="/tmp/${USERNAME}.ldif"
 
 cat > "$USER_FILE" <<EOF
 dn: uid=$USERNAME,$PEOPLE_OU,$DOMAIN_DN
+objectClass: top
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
-objectClass: top
-
 uid: $USERNAME
 sn: $USERNAME
 cn: $USERNAME
@@ -108,52 +103,31 @@ EOF
 echo "[+] Creating LDAP user..."
 
 ldapadd -x \
--D "cn=admin,$DOMAIN_DN" \
--w "$LDAP_PASS" \
--f "$USER_FILE"
+    -D "cn=admin,$DOMAIN_DN" \
+    -w "$LDAP_PASS" \
+    -f "$USER_FILE"
 
 rm -f "$USER_FILE"
 
 # ==========================================
-# Kerberos Principal
+# CREATE KERBEROS PRINCIPAL
 # ==========================================
 
+echo
 echo "[+] Creating Kerberos principal..."
 echo "Set password for $USERNAME"
 
 sudo kadmin.local -q "addprinc $USERNAME"
 
 # ==========================================
-# Storage Provisioning
-# ==========================================
-
-echo "[+] Creating NFS storage..."
-
-ssh root@$STORAGE_SERVER <<EOF
-set -e
-
-USER_DIR="/srv/nfs/users/$USERNAME"
-EXPORT_LINE="\$USER_DIR *(rw,sync,no_subtree_check,sec=krb5p)"
-
-mkdir -p "\$USER_DIR"
-
-chown $NEW_UID:$NEW_UID "\$USER_DIR"
-chmod 700 "\$USER_DIR"
-
-grep -Fxq "\$EXPORT_LINE" /etc/exports || \
-echo "\$EXPORT_LINE" >> /etc/exports
-
-exportfs -ra
-EOF
-
-# ==========================================
-# Verification
+# VERIFY
 # ==========================================
 
 echo
 echo "========== VERIFICATION =========="
 
 getent passwd "$USERNAME" || true
+id "$USERNAME" || true
 
 echo
 echo "Kerberos Principal:"
@@ -161,9 +135,8 @@ sudo kadmin.local -q "listprincs" | grep "^$USERNAME@"
 
 echo
 echo "=================================="
-echo "User Created Successfully"
+echo "AUTH USER CREATED SUCCESSFULLY"
 echo "Username : $USERNAME"
 echo "UID/GID  : $NEW_UID"
 echo "Realm    : $REALM"
-echo "Storage  : /srv/nfs/users/$USERNAME"
 echo "=================================="
